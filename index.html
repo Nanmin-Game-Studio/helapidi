@@ -1898,6 +1898,7 @@
         this._ws=null;this._connected=false;this._roomId=null;this._localPlayerId=null;
         this._ping=0;this._pingTs=0;this._reconnTries=0;
         this._sendBuf=[];this._stateBuf=[];this._tickIv=null;this.isOnline=false;
+        this._remoteInputBuf=[];  // host-relay: buffers guest input arriving via 'inputBatch'
         this._pcs=new Map();this._localStream=null;this._audioMgr=null;
       }
       connect(url,roomId,name){
@@ -1913,6 +1914,9 @@
       }
       sendInput(inp){ if(this._connected) this._sendBuf.push({type:'input',...inp}); }
       drainStateBuffer(){ const b=this._stateBuf.slice();this._stateBuf.length=0;return b; }
+      // ── Host-relay additions ──────────────────────────────────────
+      drainRemoteInput(){ const b=this._remoteInputBuf.slice();this._remoteInputBuf.length=0;return b; }
+      sendState(states){ if(this._connected) this._send({type:'state',states}); }
       async initVoice(audioMgr){
         this._audioMgr=audioMgr;
         try{
@@ -1924,6 +1928,7 @@
       _onOpen(name){ this._connected=true;this.isOnline=true;this._reconnTries=0; this._send({type:'join',roomId:this._roomId,name});this._startTick();this._ping2();bus.emit('network:connected',{roomId:this._roomId}); }
       _onMsg(m){
         if(m.type==='state'){this._stateBuf.push(m);if(this._stateBuf.length>30)this._stateBuf.shift();}
+        else if(m.type==='inputBatch'){this._remoteInputBuf.push(...(m.inputs||[]));}
         else if(m.type==='event')bus.emit(`game:${m.event}`,m.data);
         else if(m.type==='pong'){this._ping=Date.now()-this._pingTs;bus.emit('network:ping',this._ping);}
         else if(m.type==='playerId'){this._localPlayerId=m.id;bus.emit('network:playerId',m.id);}
@@ -2340,11 +2345,39 @@
           }
         }
 
+        // ── Host-relay: apply the guest's relayed input to the locally-
+        // simulated remote player. Only meaningful on the host; a guest has
+        // no incoming inputBatch (only the host relays them here).
+        if(this._network.isOnline){
+          const remoteInputs=this._network.drainRemoteInput();
+          if(remoteInputs.length){
+            const remote=this._players.find(p=>!p.isLocal);
+            if(remote){
+              for(const inp of remoteInputs){ remote.applyInput(inp,inp.dt); this._lastRemoteSeq=inp.seq; }
+            }
+          }
+        }
+
         const ticks=this._network.drainStateBuffer();
         for(const tick of ticks){
           for(const state of(tick.states||[])){
             const p=this._players.find(pl=>pl.id===state.id); if(!p) continue;
             if(p.isLocal) p.reconcile(state); else p.applyRemoteState(state,0.15);
+          }
+        }
+
+        // ── Host-relay: broadcast authoritative state. Host = whoever's
+        // local player is 'p1', by convention with the relay server (first
+        // to join a room is always assigned p1).
+        if(this._network.isOnline && this._players.find(p=>p.id==='p1')?.isLocal){
+          this._stateBroadcastTimer=(this._stateBroadcastTimer||0)+dt;
+          if(this._stateBroadcastTimer>=1/CONFIG.network.tickRate){
+            this._stateBroadcastTimer=0;
+            this._network.sendState(this._players.map(p=>({
+              id:p.id, x:p.x, y:p.y, vx:p.vx, vy:p.vy,
+              health:p.health, ammo:p.ammo, jetpack:p.jetpack, facing:p.facing,
+              lastSeq: p.isLocal ? p._seq : (this._lastRemoteSeq||0),
+            })));
           }
         }
 
