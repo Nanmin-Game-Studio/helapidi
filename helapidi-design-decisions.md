@@ -134,3 +134,18 @@ with two real headless-browser instances against a real running server (not asse
 - Server isn't deployed anywhere — runs on whoever starts `python3 relay_server.py`;
   actually hosting it somewhere both players can reach is a separate remaining task
 - 2v2/4v4 still deliberately out of scope (camera/HUD rework required first)
+
+## Single-Perspective HUD + Pause Menu — BUILT AND VERIFIED
+- Camera: new 'self' mode follows whichever player `isLocal` is (not hardcoded p1/p2),
+  auto-activates the moment a network playerId is assigned.
+- HUD: panel 1 always shows the LOCAL player's stats regardless of p1/p2 id (tested:
+  correct on both host and guest, not just array-index-0). Panel 2 hidden entirely —
+  no permanent enemy stat panel.
+- Enemy health: floating bar above an enemy's head, appears on `player:hit`, fades over
+  ~4s. Tracked in `UIManager._enemyHitTimes` (Map: playerId -> last hit timestamp).
+- Pause menu: Escape toggles a Resume/Quit overlay; gates the update loop via
+  `GameLoop._paused`. Quit currently reloads the page (no title/menu screen exists yet
+  to return to — real destination is later, once that screen is built).
+- Modes confirmed by user: Solo (1v7), Duos (2v2, selectable 2/3/4 teams), Squads (4v4)
+  — all within a fixed 8-player arena. Team-grouping logic on top of a shared room size,
+  not three separate systems. NOT built yet — this session was 1v1 HUD/camera only.

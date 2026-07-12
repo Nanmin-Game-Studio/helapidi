@@ -216,6 +216,17 @@
     </div>
   </div>
   <div id="gameContainer">
+    <div id="pauseOverlay" style="display:none;position:absolute;inset:0;z-index:5000;background:rgba(5,8,18,0.85);
+         align-items:center;justify-content:center;flex-direction:column;">
+      <div style="font-family:'Orbitron',sans-serif;font-size:24px;letter-spacing:6px;color:#fff;
+           text-shadow:0 0 20px var(--accent);margin-bottom:24px;">PAUSED</div>
+      <button id="pauseResumeBtn" style="font-family:'Share Tech Mono',monospace;font-size:14px;letter-spacing:2px;
+           padding:12px 32px;margin-bottom:12px;background:rgba(0,229,255,0.15);border:1px solid var(--accent);
+           color:#fff;border-radius:6px;cursor:pointer;">RESUME</button>
+      <button id="pauseQuitBtn" style="font-family:'Share Tech Mono',monospace;font-size:14px;letter-spacing:2px;
+           padding:12px 32px;background:rgba(255,99,71,0.15);border:1px solid var(--p2);
+           color:#fff;border-radius:6px;cursor:pointer;">QUIT</button>
+    </div>
     <canvas id="gameCanvas" width="1000" height="600"></canvas>
     <canvas id="minimap" width="200" height="120"></canvas>
     <div id="scanlines"></div>
@@ -1861,6 +1872,11 @@
             if(p){this._tx=p.x+p.width/2-this.viewportW/2;this._ty=p.y+p.height/2-this.viewportH/2;this._tz=1.3;}
             break;
           }
+          case 'self':{
+            const p=players.find(p=>p.isLocal)||players[0];
+            if(p){this._tx=p.x+p.width/2-this.viewportW/2;this._ty=p.y+p.height/2-this.viewportH/2;this._tz=1.3;}
+            break;
+          }
           case 'dynamic':{
             if(!players.length) break;
             let mnX=Infinity,mnY=Infinity,mxX=-Infinity,mxY=-Infinity;
@@ -1970,6 +1986,8 @@
       constructor(canvas,mmCanvas){
         this._canvas=canvas; this._mmCanvas=mmCanvas; this._mmCtx=mmCanvas.getContext('2d');
         this._killFeed=[]; this._announce=[];
+        this._enemyHitTimes=new Map(); // id -> timestamp, drives floating health bars on hit
+        bus.on('player:hit',({id})=>{ this._enemyHitTimes.set(id, performance.now()); });
         this._D={
           health1:document.getElementById('health1'), ammo1:document.getElementById('ammo1'),
           jetpack1:document.getElementById('jetpack1'),wins1:document.getElementById('wins1'),
@@ -2003,23 +2021,32 @@
       }
 
       updateHUD(players){
-        players.forEach((p,i)=>{
-          const n=i+1,d=this._D,G=CONFIG.gameplay;
-          if(d[`health${n}`]) d[`health${n}`].textContent=Math.max(0,Math.floor(p.health));
-          if(d[`ammo${n}`])   d[`ammo${n}`].textContent=p.ammo;
-          if(d[`jetpack${n}`])d[`jetpack${n}`].textContent=Math.floor(p.jetpack);
-          if(d[`wins${n}`])   d[`wins${n}`].textContent=p.wins;
-          const hpPct=Math.max(0,p.health/G.maxHealth)*100;
-          const amPct=(p.ammo/(CONFIG.weapons[p.weaponSystem.activeWeapon]?.mag||10))*100;
-          const jtPct=(p.jetpack/G.maxJetpack)*100;
+        const d=this._D,G=CONFIG.gameplay;
+        const me = players.find(p=>p.isLocal) || players[0];
+        if(me){
+          const n=1;
+          if(d[`health${n}`]) d[`health${n}`].textContent=Math.max(0,Math.floor(me.health));
+          if(d[`ammo${n}`])   d[`ammo${n}`].textContent=me.ammo;
+          if(d[`jetpack${n}`])d[`jetpack${n}`].textContent=Math.floor(me.jetpack);
+          if(d[`wins${n}`])   d[`wins${n}`].textContent=me.wins;
+          const hpPct=Math.max(0,me.health/G.maxHealth)*100;
+          const amPct=(me.ammo/(CONFIG.weapons[me.weaponSystem.activeWeapon]?.mag||10))*100;
+          const jtPct=(me.jetpack/G.maxJetpack)*100;
           if(d[`hpB${n}`]){ d[`hpB${n}`].style.width=`${hpPct}%`; d[`hpB${n}`].style.background=`hsl(${hpPct*1.2},80%,45%)`; }
           if(d[`amB${n}`]) d[`amB${n}`].style.width=`${amPct}%`;
           if(d[`jtB${n}`]){ d[`jtB${n}`].style.width=`${jtPct}%`; }
           const rw=d[`rw${n}`],rb=d[`rb${n}`];
-          if(rw&&rb){ if(p.reloading){rw.style.display='block';rb.style.width=`${(1-(p.reloadTimer/G.reloadDuration))*100}%`;}else rw.style.display='none';}
+          if(rw&&rb){ if(me.reloading){rw.style.display='block';rb.style.width=`${(1-(me.reloadTimer/G.reloadDuration))*100}%`;}else rw.style.display='none';}
           const ps=document.getElementById(`player${n}Stats`);
-          if(ps) ps.classList.toggle('low-health',p.health<25&&!p.dead);
-        });
+          if(ps) ps.classList.toggle('low-health',me.health<25&&!me.dead);
+        }
+        // Networked single-perspective: no permanent second panel — enemy info
+        // is shown as a floating health bar on hit instead (see _drawEnemyHealthBars).
+        if(this._network2p===undefined){
+          this._network2p=document.getElementById('player2Stats');
+          const h3=document.querySelector('#player1Stats h3'); if(h3) h3.textContent='YOU';
+        }
+        if(this._network2p) this._network2p.style.display='none';
       }
 
       updateDebug(fps,ping){
@@ -2040,9 +2067,31 @@
       drawCanvasUI(ctx, players, platforms, camera, hudAnimator){
         this._drawKillFeed(ctx);
         this._drawAnnounce(ctx);
-        // Draw weapon HUD for P1 (primary player)
-        if(players[0]) this._drawWeaponHUD(ctx, players[0].weaponSystem, ctx.canvas.width/2, ctx.canvas.height-18);
-        if(hudAnimator) hudAnimator.updateWeaponAmmoHUD(players[0]?.weaponSystem);
+        const me = players.find(p=>p.isLocal) || players[0];
+        if(me) this._drawWeaponHUD(ctx, me.weaponSystem, ctx.canvas.width/2, ctx.canvas.height-18);
+        if(hudAnimator) hudAnimator.updateWeaponAmmoHUD(me?.weaponSystem);
+        this._drawEnemyHealthBars(ctx, players, camera);
+      }
+
+      // Floating health bar above an enemy's head — appears on hit, fades after ~4s.
+      // No permanent enemy panel, matches the single-perspective spec.
+      _drawEnemyHealthBars(ctx, players, camera){
+        const now=performance.now(), FADE_MS=4000, G=CONFIG.gameplay;
+        for(const p of players){
+          if(p.isLocal || p.dead) continue;
+          const lastHit=this._enemyHitTimes.get(p.id);
+          if(!lastHit) continue;
+          const age=now-lastHit;
+          if(age>FADE_MS) continue;
+          const alpha=age<FADE_MS-600 ? 1 : Math.max(0,(FADE_MS-age)/600);
+          const sx=(p.x+p.width/2-camera.x-camera.shakeX)*camera.zoom;
+          const sy=(p.y-camera.y-camera.shakeY)*camera.zoom-14;
+          const w=46,h=6, pct=Math.max(0,p.health/G.maxHealth);
+          ctx.save(); ctx.globalAlpha=alpha;
+          ctx.fillStyle='rgba(10,10,18,0.75)'; ctx.fillRect(sx-w/2-1,sy-1,w+2,h+2);
+          ctx.fillStyle=`hsl(${pct*120},80%,45%)`; ctx.fillRect(sx-w/2,sy,w*pct,h);
+          ctx.restore();
+        }
       }
 
       // ── Weapon slot HUD (bottom centre) ─────────────────────────
@@ -2306,7 +2355,7 @@
         this._audio.init();
         if(wsUrl){
           this._network.connect(wsUrl,roomId,'Player');
-          bus.once('network:playerId',id=>{this._players.forEach(p=>{p.isLocal=(p.id===id);});});
+          bus.once('network:playerId',id=>{this._players.forEach(p=>{p.isLocal=(p.id===id);}); this._camera.setMode('self');});
         }
         bus.emit('game:roundStart');
         this._roundActive=true;
@@ -2336,7 +2385,7 @@
       }
 
       _update(dt){
-        if(!this._roundActive) return;
+        if(!this._roundActive || this._paused) return;
 
         for(const p of this._players){
           if(p.isLocal){
@@ -2625,16 +2674,24 @@
     ];
 
     function startGame(){
-      const WS_URL = 'ws://localhost:8765';
+      const WS_URL  = '';
       const ROOM_ID = window.location.hash.slice(1) || (WS_URL ? prompt('Room code — type the exact same code in both windows:', 'test1') : null) || null;
       const game    = new GameLoop();
       game.init(WS_URL, ROOM_ID);
       window.__game = game;
 
+      const pauseOverlay = document.getElementById('pauseOverlay');
+      const setPaused = (v)=>{ game._paused = v; pauseOverlay.style.display = v ? 'flex' : 'none'; };
+      window.addEventListener('keydown', e=>{
+        if(e.key==='Escape') setPaused(!game._paused);
+      });
+      document.getElementById('pauseResumeBtn').addEventListener('click', ()=>setPaused(false));
+      document.getElementById('pauseQuitBtn').addEventListener('click', ()=>location.reload());
+
       console.log('%c🎮 Hēlapidi — Full Weapons & Animation Engine Ready','color:#4CAF50;font-size:15px;font-weight:bold;');
       console.log('P1: A/D/W/Space/F/R  |  1-5: Switch weapon  |  G: Throw grenade  |  M: Plant mine');
       console.log('P2: ←/→/↑/Shift/L/P  |  K: Throw grenade  |  ;: Plant mine');
-      console.log('Camera: buttons top-right');
+      console.log('Camera: buttons top-right  |  ESC: pause menu');
     }
 
     function runBootSequence(){
