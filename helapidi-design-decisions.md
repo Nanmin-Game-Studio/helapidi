@@ -1,0 +1,136 @@
+# Hēlapidi — Design Decisions Log
+*Living doc — update as decisions change. Last updated: July 10, 2026*
+
+## Repo
+https://github.com/Nanmin-Game-Studio/helapidi.git — branch `main`, 2 commits already in
+(`Initial commit - Helapidi`, `Remove misnamed file`). Not starting from zero — build the
+commit habit from here, not from `git init`.
+
+## Core Loop
+Multiplayer shooting game. Modes: 1v1, 2v2, 4v4.
+
+## Game Client — EXISTS (`index.html`, ~2,560 lines)
+A real, working single-file canvas engine, not a stub:
+- `EventEmitter`, `ParticleSystem`, `WeaponSystem`, `AmmoCrateSystem`, `GrenadeSystem`,
+  `LandmineSystem`, `HUDAnimator`, `InputManager`, `AudioManager`, `Player`, `Camera`,
+  `NetworkManager`, `UIManager`, `GameLoop`
+- `InputManager` already abstracts keyboard, gamepad, and touch behind one
+  `isPressed(playerId, action)` interface — this is the exact interface the motion
+  controller was always meant to plug into as a 4th input source
+- Touch controls already built, but as a same-device split-screen 2P layout (both
+  players' virtual buttons rendered together, left/right halves). Needs adjustment
+  for remote play, where each device shows only its own controls
+- `Player` already has an animation state machine (`_aState`, `_aFrame`) — currently
+  driving colored-rectangle rendering, ready to swap for real sprites
+- `NetworkManager` is scaffolded but not wired to a real server (`WS_URL` is empty —
+  offline mode only). Real message protocol: `join`, `input`, `inputBatch` (batched
+  raw input at tick rate), `state` (buffered snapshots), `event`, `ping`/`pong`, plus
+  WebRTC signaling (`rtcOffer`/`rtcAnswer`/`rtcIce`) for peer-to-peer voice chat
+
+## Characters — designed, not yet integrated as sprites
+- **Kehi** (Kehibella) — Sri Lankan Blue Magpie-inspired, dual kris daggers, feather
+  shotgun, slow-pace handgun, grenade/landmine
+- **Kottu Rush** — chef-themed, chopper-rifle-ax, heat-plate spreader, spice-pistol, jetpack
+- **Tuk-Tuk Aiya** — rifle, wrench melee, tuk-tuk sprint transformation, grenade/landmine
+- Matches spec exactly: 2 male (Kottu Rush, Tuk-Tuk Aiya) + 1 female (Kehi)
+- Animation sheets are discrete labeled poses (Idle, Jetpack Start/Fly/Loop/Finish, Gun
+  Shoot, Knife Slash, Grenade Toss, Win/Defeat) — same shape as the `_aState`/`_aFrame`
+  system already in `Player`. Likely needs frame-slicing, not a new animation tool —
+  confirm this for real at step 4.
+
+## World / UI Art — exists, not yet wired in
+Main menu ("HĒLAPIDI" stone-arch title), game room (team-select lobby with VS mask +
+enter-arena flow), Sigiriya-referencing ruin/platform level art, moonlit harbor level
+art, Nanmin Game Studio logo.
+
+## Aiming Mechanism — DECIDED: Zone Lock-On
+- Reuses `lean_x` (already calibrated) as the zone selector: lean left / center / right
+- Fire trigger reuses existing velocity-spike detection
+- Auto-targets nearest enemy inside the selected zone
+- RISK — zone flicker: needs hysteresis (lock holds until lean crosses well past boundary)
+- RISK — mirrored zones: "lean left" must mean the same on-screen thing for both players
+- DEPENDENCY — needs real networking (see below)
+
+## Networking — CORRECTED DIRECTION
+Earlier match-server draft (`match_server.py`) does NOT match this client's real
+protocol and needs to be redone, not extended. Given `NetworkManager` already expects
+raw `inputBatch` from clients and broadcasts `state` snapshots, the sane path is
+**host-relay**: whoever creates the room runs the same local simulation the engine
+already runs for local 2P, treated as authoritative; the server is a dumb router by
+room — forward guests' `input`/`inputBatch` to the host, forward the host's `state` to
+guests, relay `ping`/`pong` and WebRTC signaling untouched. Avoids duplicating the
+already-working physics/collision logic server-side. Not built yet.
+
+## Game Room (proposed flow; art mockup already exists for team-select screen)
+1. Player connects, picks mode (1v1/2v2/4v4), quick-match or room code
+2. Quick-match auto-splits teams for 2v2/4v4 — blind/random, no skill rating yet
+3. Manual mode: host assigns Team A / Team B slots
+4. Ready state = connected AND calibrated, not just connected
+5. All ready → countdown → arena load → spawn by team side
+
+## Roster Size, v1
+Original "2 for v1" recommendation is largely moot — 3 characters are already fully
+designed (Kehi, Kottu Rush, Tuk-Tuk Aiya). Fine to launch with what exists; just don't
+design a 4th before the core loop actually works end to end.
+
+## Mobile
+- Confirmed: full native app on Play Store + App Store is the long-term target
+- Existing touch controls are a real head start, but need reshaping from same-device
+  split-screen to one-player-per-device
+- Non-negotiable: all input sources (keyboard, touch, motion) write to the same
+  `InputManager` state — no duplicated decision logic between them
+
+## Sequence, as of this update
+1. Git discipline from actual current state (in progress)
+2. Networking protocol fix — host-relay server matching the real message types
+3. Motion capture wired in as a 4th `InputManager` source
+4. Character sprite integration (Kehi / Kottu Rush / Tuk-Tuk Aiya) into `_aState`;
+   confirm animation tooling need here
+5. Remaining screens — splash, loading, level select, shop, settings/profile
+
+## Networking — Investigation Findings (git verified, commit f192ce2 live)
+- Client ALREADY implements client-side prediction + reconciliation: `Player` buffers
+  local input with sequence numbers (`_seq`, `_inputBuffer`), applies instantly, and on
+  receiving authoritative `state` discards acknowledged inputs (`state.lastSeq`) and
+  replays the rest. This is real, working netcode groundwork — not scaffolding.
+- Client NEVER sends a `state` message — only consumes it (`_stateBuf`, drained each
+  tick). Confirms original design intent was a real authoritative server, not host-relay.
+  Host-relay is still the right call for a solo dev, but means writing NEW code on the
+  host's client to serialize its own `Player` objects into `state` messages — not free.
+- Zero room-creation/joining UI exists anywhere. Room = URL hash fragment, nothing else.
+  Building real lobby UI stays step 5. Testing the protocol fix uses two tabs with a
+  manually-typed matching hash — ugly and temporary on purpose.
+- `_players` is built from `CONFIG.players.map(...)` — not hardcoded to 2, scales in
+  principle. But camera modes (Static/Follow P1/Follow P2/Dynamic/Split) and HUD (two
+  fixed panels) assume exactly 2 players. Real constraint, not a guess.
+- SCOPE CUT: this networking pass targets 1v1 only. 2v2/4v4 wait for a separate camera +
+  HUD rework — don't stack that problem on top of this one.
+- CONFIG.network: tickRate 20Hz, reconnect up to 5x with exponential backoff (already
+  built and working at the transport level).
+
+## Next Build (in progress)
+Python relay server matching real message types: `join`→assign `playerId`,
+`input`/`inputBatch` from guest→host, `state` from host→guest, `ping`/`pong`. Plus new
+host-side client code to serialize `Player` state and broadcast it. 1v1 only.
+
+## Networking — 1v1 Host-Relay: BUILT AND VERIFIED
+`relay_server.py` (Python/websockets) + client patch to `index.html`, tested end to end
+with two real headless-browser instances against a real running server (not asserted):
+- Host joins first → assigned `p1`. Guest joins second → assigned `p2`. Room full at 2.
+- Guest's `inputBatch` relayed to host; host applies it to its local (non-local) p2 via
+  the existing `applyInput()` — no new physics code, reused what was already there.
+- Host broadcasts `state` (both players, matching the exact schema the client already
+  expected: id/x/y/vx/vy/health/ammo/jetpack/facing/lastSeq) at `CONFIG.network.tickRate`.
+- Verified: guest moves → host's independent simulation lands on the exact same
+  coordinates as the guest's own prediction. Host moves → guest's smoothed view
+  converges to the exact same coordinates as the host's own prediction. Both directions
+  confirmed, not just one.
+
+### Known limits of this pass — not yet done, know before relying on this
+- Tested on localhost only — real internet latency/packet loss/jitter not exercised
+- No lobby UI — room = manually-typed URL hash, on purpose, per the sequencing decision
+- No reconnect-mid-match testing — transport reconnect exists (already built), whether
+  game state recovers cleanly after a host or guest reconnects is unverified
+- Server isn't deployed anywhere — runs on whoever starts `python3 relay_server.py`;
+  actually hosting it somewhere both players can reach is a separate remaining task
+- 2v2/4v4 still deliberately out of scope (camera/HUD rework required first)

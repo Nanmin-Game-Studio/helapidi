@@ -1925,13 +1925,13 @@
         }catch(e){console.warn('[Network] Mic unavailable:',e.message);}
       }
       toggleMute(){ const m=this._localStream?.getAudioTracks()[0]?.enabled; this._localStream?.getAudioTracks().forEach(t=>t.enabled=!m); return !m; }
-      _onOpen(name){ this._connected=true;this.isOnline=true;this._reconnTries=0; this._send({type:'join',roomId:this._roomId,name});this._startTick();this._ping2();bus.emit('network:connected',{roomId:this._roomId}); }
+      _onOpen(name){ this._connected=true;this.isOnline=true;this._reconnTries=0; this._send({type:'join',roomId:this._roomId,name});this._startTick();this._ping2();bus.emit('network:connected',{roomId:this._roomId}); console.log('[Network] Joining room:',this._roomId); }
       _onMsg(m){
         if(m.type==='state'){this._stateBuf.push(m);if(this._stateBuf.length>30)this._stateBuf.shift();}
         else if(m.type==='inputBatch'){this._remoteInputBuf.push(...(m.inputs||[]));}
         else if(m.type==='event')bus.emit(`game:${m.event}`,m.data);
         else if(m.type==='pong'){this._ping=Date.now()-this._pingTs;bus.emit('network:ping',this._ping);}
-        else if(m.type==='playerId'){this._localPlayerId=m.id;bus.emit('network:playerId',m.id);}
+        else if(m.type==='playerId'){this._localPlayerId=m.id;bus.emit('network:playerId',m.id); console.log('[Network] Assigned player ID:',m.id); document.title='Hēlapidi — room '+this._roomId+' — you are '+m.id;}
         else if(m.type==='rtcOffer')this._handleOffer(m.from,m.offer);
         else if(m.type==='rtcAnswer')this._pcs.get(m.from)?.setRemoteDescription(m.answer);
         else if(m.type==='rtcIce')this._pcs.get(m.from)?.addIceCandidate(m.candidate).catch(()=>{});
@@ -2625,8 +2625,8 @@
     ];
 
     function startGame(){
-      const WS_URL  = '';
-      const ROOM_ID = window.location.hash.slice(1)||null;
+      const WS_URL = 'ws://localhost:8765';
+      const ROOM_ID = window.location.hash.slice(1) || (WS_URL ? prompt('Room code — type the exact same code in both windows:', 'test1') : null) || null;
       const game    = new GameLoop();
       game.init(WS_URL, ROOM_ID);
       window.__game = game;
