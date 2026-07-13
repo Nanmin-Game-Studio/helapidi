@@ -177,3 +177,14 @@ melee. New weapons via random treasure-box spawns (same category as fuel/ammo pi
 opening one has an unlock delay during which the player can't fire — a deliberate
 vulnerability window for balance. Swapping = drop current, pick up new. Real,
 well-specified idea — sequenced after the current bug-fix pass, not part of it.
+
+## Coin Collection — Corrected to Per-Player (was wrongly shared)
+Previous fix solved the sync *race* but kept coins as one shared total — wrong data
+model, confirmed by your screenshot showing identical "2/20" on both screens. Reworked:
+- `coinsCollected` is now a property on each `Player`, not one shared counter.
+- Collision check credits whichever specific player touched the coin.
+- Host still authoritative for detection (unchanged, still avoids the original race),
+  but now broadcasts `{index, playerId, count}` so the guest credits the right player.
+- HUD shows only the local player's own count — verified independently correct on both
+  screens (not coincidentally equal).
+- Resets per-player each round, alongside the existing coin respawn.

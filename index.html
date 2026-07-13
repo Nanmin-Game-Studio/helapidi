@@ -1388,7 +1388,7 @@
         this._blinkTimer=0; this._isBlinking=false;
         this._inputBuffer=[]; this._seq=0;
         this._platforms=[];
-        this.wins=0; this.kills=0; this.deaths=0;
+        this.wins=0; this.kills=0; this.deaths=0; this.coinsCollected=0;
         this.isLocal=true;
         this.bullets=[];
 
@@ -2272,7 +2272,7 @@
         this._clouds=this._genClouds(14);
 
         // Coin system
-        this._coins=[]; this._coinsCollected=0;
+        this._coins=[];
         this._coinCountEl=document.getElementById('coinCount');
         this._coinTotalEl=document.getElementById('coinTotal');
         this._initCoins();
@@ -2298,8 +2298,9 @@
           this._fallDmgHudTimer=2.0; this._updateHealthBarHUD();
           if(this._fallDmgLabel) this._fallDmgLabel.style.display='block';
         });
-        bus.on('coin:collected',({total})=>{
-          if(this._coinCountEl) this._coinCountEl.textContent=total;
+        bus.on('coin:collected',({playerId,count})=>{
+          const isMine=this._players.find(p=>p.id===playerId)?.isLocal ?? true;
+          if(isMine && this._coinCountEl) this._coinCountEl.textContent=count;
           this._hud.flashCoin();
         });
         bus.on('weapon:trySwitch',({slot,playerId})=>{
@@ -2321,7 +2322,7 @@
       }
 
       _resetCoins(){
-        this._coinsCollected=0;
+        this._players.forEach(p=>{ p.coinsCollected=0; });
         this._coins.forEach(c=>{c.collected=false;});
         if(this._coinCountEl) this._coinCountEl.textContent='0';
       }
@@ -2345,8 +2346,9 @@
             if(this._network.isOnline && !iAmHost){
               const coin=this._coins[data.index];
               if(coin && !coin.collected){ coin.collected=true; this._particles.emitCoinBurst(coin.x,coin.y); }
-              this._coinsCollected=data.total;
-              bus.emit('coin:collected',{total:data.total});
+              const p=this._players.find(pl=>pl.id===data.playerId);
+              if(p) p.coinsCollected=data.count;
+              bus.emit('coin:collected',{playerId:data.playerId,count:data.count});
             }
           });
           bus.on('game:roundEnd',(data)=>{
@@ -2446,10 +2448,10 @@
             const px=p.x+p.width/2,py=p.y+p.height/2;
             const dx=px-coin.x,dy=py-coin.y;
             if(dx*dx+dy*dy<COLLECT_R*COLLECT_R){
-              coin.collected=true; this._coinsCollected++;
+              coin.collected=true; p.coinsCollected++;
               this._particles.emitCoinBurst(coin.x,coin.y);
-              bus.emit('coin:collected',{total:this._coinsCollected});
-              if(this._network.isOnline) this._network.sendEvent('coinCollected',{index:this._coins.indexOf(coin),total:this._coinsCollected});
+              bus.emit('coin:collected',{playerId:p.id,count:p.coinsCollected});
+              if(this._network.isOnline) this._network.sendEvent('coinCollected',{index:this._coins.indexOf(coin),playerId:p.id,count:p.coinsCollected});
               break;
             }
           }
