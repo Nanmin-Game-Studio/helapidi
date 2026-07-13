@@ -95,6 +95,10 @@ async def handler(ws):
             elif mtype in ('rtcOffer', 'rtcAnswer', 'rtcIce'):
                 await relay_to_peer(ws, msg)
 
+            elif mtype == 'event':
+                # generic game-state sync (round-over, coin pickups, etc.) — host -> guest only
+                await relay_to_peer(ws, msg)
+
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:

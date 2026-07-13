@@ -149,3 +149,31 @@ with two real headless-browser instances against a real running server (not asse
 - Modes confirmed by user: Solo (1v7), Duos (2v2, selectable 2/3/4 teams), Squads (4v4)
   — all within a fixed 8-player arena. Team-grouping logic on top of a shared room size,
   not three separate systems. NOT built yet — this session was 1v1 HUD/camera only.
+
+## Bug Fixes — Round-Over Sync, Coin Sync, Weapon Switch, Dead UI (VERIFIED)
+- **Round-over/wins desync (root cause found):** both host and guest ran
+  `_checkRoundOver()` independently against their own (differently-timed) view of the
+  other player's health, so they could reach different conclusions at different
+  moments — matching the screenshot evidence (different wins count, overlay on one
+  screen not the other). Fixed: host-authoritative — only host decides, broadcasts via
+  a new `sendEvent('roundEnd',{winner,s1,s2})`, guest applies it directly. Server needed
+  a new generic `event` relay case to support this (added).
+- **Coin collection desync:** same root cause, different system — both sides ran their
+  own collision check against both players. Fixed the same way: host-only decides,
+  broadcasts `{index,total}`, guest applies without re-deciding.
+- **Weapon switch (1-5 keys) was hardcoded to always target `p1`** regardless of who
+  pressed it — a leftover from local same-device 2P. Fixed to target whichever player
+  is actually local on that client.
+- **Removed a pre-existing always-on name-tag + health bar** drawn above every player's
+  head every frame (separate from the hit-triggered one already built) — this is what
+  was actually causing "the health bar never goes away."
+- **Removed the camera mode selector panel** (Static/Follow P1/Follow P2/Dynamic/Split)
+  entirely — dead UI now that camera auto-follows the local player.
+
+## Weapon System Redesign — PROPOSED, NOT BUILT
+Mini Militia-referenced spec: 3 inventory slots total (2 weapons + 1 explosive slot
+holding either 3 grenades or 2 landmines, not both). Start with pistol + character
+melee. New weapons via random treasure-box spawns (same category as fuel/ammo pickups);
+opening one has an unlock delay during which the player can't fire — a deliberate
+vulnerability window for balance. Swapping = drop current, pick up new. Real,
+well-specified idea — sequenced after the current bug-fix pass, not part of it.
