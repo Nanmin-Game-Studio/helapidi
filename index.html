@@ -365,10 +365,12 @@
         smg:      { label:'SMG',      slot:3, mag:25,  reserve:100, fireRate:3/60,  damage:8,  spread:0.07, recoil:2, pellets:1, unlocked:true  },
         grenade:  { label:'GRENADE',  slot:4, count:3, cookTime:1.5, damage:60, radius:80, unlocked:true  },
         landmine: { label:'LANDMINE', slot:5, count:2, damage:80, radius:90, unlocked:true  },
+        melee:    { label:'MELEE',    damage:35, range:40, unlocked:true  },
       },
 
       // ── Ammo crate ────────────────────────────────────────────────
       ammoCrate: { spawnInterval:18, ammoRefill:15, maxCrates:4 },
+      treasureBox: { spawnInterval:22, maxBoxes:2, radius:36, unlockTime:2.5, pool:['pistol','shotgun','smg'] },
 
       players: [
         { id:'p1', label:'Player 1', color:'#4CAF50', accentColor:'#81C784', spawnX:400, spawnY:700,
@@ -498,23 +500,27 @@
     // ╚══════════════════════════════════════════════════════════════╝
     class WeaponSystem {
       constructor(playerId) {
-        this.playerId     = playerId;
-        this.activeWeapon = 'pistol';
+        this.playerId = playerId;
 
-        // Runtime ammo tracking (separate from CONFIG defs)
-        this._ammo = {};
-        const defs = CONFIG.weapons;
-        for(const [key,def] of Object.entries(defs)){
-          if('mag' in def)    this._ammo[key] = { mag:def.mag, reserve:def.reserve };
-          else if('count' in def) this._ammo[key] = { count:def.count };
-        }
+        // ── New model: 2 weapon slots + 1 explosive slot ─────────────
+        // Every player starts identically: a pistol and their (currently generic,
+        // pending character integration) melee weapon. New guns come from treasure
+        // boxes later (not built yet) via equipWeapon().
+        this.weaponSlots = [ this._makeSlot('pistol'), this._makeSlot('melee') ];
+        this.activeSlotIndex = 0;
+        this.explosive = { type:'grenade', count:3 }; // or {type:'landmine',count:2}; null when empty
+
+        // Mirrors weaponSlots[activeSlotIndex].type. Kept in sync on every switch/
+        // equip so the ~25 existing call sites (HUD, shoot/throw logic, damage calc)
+        // that already read ws.activeWeapon keep working unmodified.
+        this.activeWeapon = this.weaponSlots[0].type;
 
         // Switching state
-        this._switchLock     = 0;   // seconds remaining — blocks new switch
-        this._slideOffset    = 0;   // y-offset for slide-in animation (px)
+        this._switchLock     = 0;
+        this._slideOffset    = 0;
         this._slideDuration  = 0.28;
 
-        // Recoil state (x-offset in weapon HUD)
+        // Recoil state
         this._recoilOffset   = 0;
         this._recoilTimer    = 0;
         this._recoilMax      = 0;
@@ -523,144 +529,139 @@
         this._emptyShakeTimer = 0;
         this._emptyShakeAmp   = 0;
 
-        // LOCKED slot feedback
+        // LOCKED slot feedback (now flashes on an empty slot, not an unowned weapon)
         this._lockedSlot  = -1;
         this._lockedTimer = 0;
 
-        // Grenade cook state (while throw key held)
+        // Grenade/mine cook state (unchanged)
         this._cookTimer   = 0;
         this._isCooking   = false;
 
-        // Slot scale targets (1.0 → 1.15 for active)
-        this._slotScales = [1,1,1,1,1];
-        this._slotScaleTargets = [1,1,1,1,1];
+        // Slot scale targets — 2 weapon slots now, not 5
+        this._slotScales = [1,1];
+        this._slotScaleTargets = [1,1];
       }
 
-      // Called from InputManager when key 1-5 pressed
-      trySwitch(slot){
-        const keys = ['pistol','shotgun','smg','grenade','landmine'];
-        const next = keys[slot-1];
-        if(!next || next === this.activeWeapon) return;
-        if(this._switchLock > 0) return;
+      _makeSlot(type){
+        const def = CONFIG.weapons[type];
+        if(def && 'mag' in def) return { type, mag:def.mag, reserve:def.reserve };
+        return { type }; // melee, or any no-ammo weapon — always available, no reload
+      }
 
-        const def = CONFIG.weapons[next];
-        if(!def.unlocked){
-          this._lockedSlot  = slot;
-          this._lockedTimer = 0.5;
-          bus.emit('weapon:locked', { slot, playerId:this.playerId });
+      // slot is 1 or 2 now (was 1-5) — switches between currently HELD weapons only
+      trySwitch(slot){
+        const idx = slot-1;
+        if(idx<0 || idx>1) return;
+        if(!this.weaponSlots[idx]){
+          this._lockedSlot=slot; this._lockedTimer=0.5;
+          bus.emit('weapon:locked',{slot,playerId:this.playerId});
           return;
         }
+        if(idx===this.activeSlotIndex || this._switchLock>0) return;
 
         const prev = this.activeWeapon;
-        this.activeWeapon  = next;
-        this._switchLock   = this._slideDuration;
-        this._slideOffset  = 55; // start below, animate up
-        bus.emit('weapon:switch', { prev, next, playerId:this.playerId });
+        this.activeSlotIndex = idx;
+        this.activeWeapon    = this.weaponSlots[idx].type;
+        this._switchLock     = this._slideDuration;
+        this._slideOffset    = 55;
+        bus.emit('weapon:switch', { prev, next:this.activeWeapon, playerId:this.playerId });
       }
 
-      // Current mag ammo
-      getMag(){
-        const a = this._ammo[this.activeWeapon];
-        return a?.mag ?? a?.count ?? 0;
+      // Pickup a new weapon (treasure box — not built yet — or debug grant). Fills
+      // an empty slot if one exists; otherwise replaces the currently active slot.
+      // Returns the dropped weapon's type (or null), so a caller can eventually spawn
+      // a world pickup for it once drop-to-ground exists.
+      equipWeapon(type){
+        const emptyIdx = this.weaponSlots.findIndex(s=>!s);
+        const targetIdx = emptyIdx!==-1 ? emptyIdx : this.activeSlotIndex;
+        const dropped = this.weaponSlots[targetIdx]?.type || null;
+        this.weaponSlots[targetIdx] = this._makeSlot(type);
+        this.activeSlotIndex = targetIdx;
+        this.activeWeapon    = type;
+        bus.emit('weapon:equipped', { type, dropped, playerId:this.playerId });
+        return dropped;
       }
-      getReserve(){
-        const a = this._ammo[this.activeWeapon];
-        return a?.reserve ?? 0;
+
+      // Use whatever's in the explosive slot. Returns the type used, or null if empty.
+      // Caller (Player.applyInput) is responsible for checking type/count before
+      // calling this — matches the existing grenade-throw call pattern.
+      useExplosive(){
+        if(!this.explosive || this.explosive.count<=0) return null;
+        const type = this.explosive.type;
+        this.explosive.count--;
+        if(this.explosive.count<=0) this.explosive=null;
+        return type;
       }
+
+      // Current mag ammo — reads the ACTIVE slot now, not a type-keyed pool
+      getMag(){ return this.weaponSlots[this.activeSlotIndex]?.mag ?? 0; }
+      getReserve(){ return this.weaponSlots[this.activeSlotIndex]?.reserve ?? 0; }
 
       consumeShot(){
-        const a = this._ammo[this.activeWeapon];
-        if(!a) return false;
-        if('mag' in a){ if(a.mag <= 0) return false; a.mag--; return true; }
-        if('count' in a){ if(a.count <= 0) return false; a.count--; return true; }
-        return false;
+        const s = this.weaponSlots[this.activeSlotIndex];
+        if(!s || !('mag' in s) || s.mag<=0) return false;
+        s.mag--; return true;
       }
 
       canReload(){
-        const a = this._ammo[this.activeWeapon];
-        if(!a || !('mag' in a)) return false;
-        const def = CONFIG.weapons[this.activeWeapon];
-        return a.mag < def.mag && a.reserve > 0;
+        const s = this.weaponSlots[this.activeSlotIndex];
+        if(!s || !('mag' in s)) return false;
+        const def = CONFIG.weapons[s.type];
+        return s.mag < def.mag && s.reserve > 0;
       }
 
       doReload(){
-        const a   = this._ammo[this.activeWeapon];
-        const def = CONFIG.weapons[this.activeWeapon];
-        if(!a || !('mag' in a)) return;
-        const needed = def.mag - a.mag;
-        const take   = Math.min(needed, a.reserve);
-        a.mag    += take;
-        a.reserve -= take;
+        const s = this.weaponSlots[this.activeSlotIndex];
+        if(!s || !('mag' in s)) return;
+        const def = CONFIG.weapons[s.type];
+        const needed = def.mag - s.mag, take = Math.min(needed, s.reserve);
+        s.mag += take; s.reserve -= take;
       }
 
       refillAmmo(amount){
-        const a = this._ammo[this.activeWeapon];
-        if(a && 'reserve' in a){
-          const def = CONFIG.weapons[this.activeWeapon];
-          a.reserve = Math.min((def.reserve||0), a.reserve + amount);
+        const s = this.weaponSlots[this.activeSlotIndex];
+        if(s && 'reserve' in s){
+          const def = CONFIG.weapons[s.type];
+          s.reserve = Math.min((def.reserve||0), s.reserve + amount);
         }
       }
 
       applyRecoil(){
         const def = CONFIG.weapons[this.activeWeapon];
-        this._recoilMax   = def.recoil || 4;
+        this._recoilMax    = def?.recoil || 4;
         this._recoilOffset = this._recoilMax;
         this._recoilTimer  = 0.08;
       }
 
-      applyEmptyClick(){
-        this._emptyShakeTimer = 0.3;
-        this._emptyShakeAmp   = 3;
-      }
+      applyEmptyClick(){ this._emptyShakeTimer=0.3; this._emptyShakeAmp=3; }
 
       startCook(){ if(!this._isCooking){ this._isCooking=true; this._cookTimer=0; } }
       stopCook() { this._isCooking=false; this._cookTimer=0; }
-      cookProgress(){ return this._isCooking ? Math.min(this._cookTimer/CONFIG.weapons.grenade.cookTime,1) : 0; }
+      cookProgress(){ return this._isCooking ? Math.min(this._cookTimer/(CONFIG.weapons.grenade.cookTime||1.5),1) : 0; }
 
       update(dt){
-        // Switch lock timer
         if(this._switchLock > 0) this._switchLock -= dt;
-
-        // Slide animation
-        if(this._slideOffset > 0){
-          this._slideOffset = Math.max(0, this._slideOffset - (55/this._slideDuration)*dt);
-        }
-
-        // Recoil return
+        if(this._slideOffset > 0) this._slideOffset = Math.max(0, this._slideOffset-(55/this._slideDuration)*dt);
         if(this._recoilTimer > 0){
           this._recoilTimer -= dt;
           this._recoilOffset = (this._recoilTimer/0.08)*this._recoilMax;
-          if(this._recoilTimer <= 0) this._recoilOffset=0;
+          if(this._recoilTimer<=0) this._recoilOffset=0;
         }
-
-        // Empty click shake
         if(this._emptyShakeTimer > 0) this._emptyShakeTimer -= dt;
-
-        // LOCKED flash timer
         if(this._lockedTimer > 0) this._lockedTimer -= dt;
-
-        // Cook timer
         if(this._isCooking) this._cookTimer += dt;
 
-        // Slot scale lerp
-        const slots = ['pistol','shotgun','smg','grenade','landmine'];
-        slots.forEach((w,i)=>{
-          this._slotScaleTargets[i] = w===this.activeWeapon ? 1.15 : 1.0;
+        for(let i=0;i<2;i++){
+          this._slotScaleTargets[i] = i===this.activeSlotIndex ? 1.15 : 1.0;
           this._slotScales[i] += (this._slotScaleTargets[i]-this._slotScales[i])*0.2;
-        });
+        }
       }
 
-      // Returns current x offset for weapon HUD shake/recoil
       getRecoilX(){
-        if(this._emptyShakeTimer > 0){
-          return Math.sin(this._emptyShakeTimer*80)*3*(this._emptyShakeTimer/0.3);
-        }
+        if(this._emptyShakeTimer > 0) return Math.sin(this._emptyShakeTimer*80)*3*(this._emptyShakeTimer/0.3);
         return -this._recoilOffset;
       }
-
-      // Returns y offset for slide-in animation
       getSlideY(){ return this._slideOffset; }
-
       isLockedSlot(slot){ return this._lockedSlot===slot && this._lockedTimer>0; }
       isLockedFlashOn(){ return this._lockedTimer>0 && Math.floor(this._lockedTimer*16)%2===0; }
     }
@@ -786,7 +787,128 @@
     }
 
     // ╔══════════════════════════════════════════════════════════════╗
-    // ║  MODULE: GrenadeSystem                                       ║
+    // ║  MODULE: TreasureBoxSystem                                    ║
+    // ║  Random weapon pickups. Host-authoritative: only the host    ║
+    // ║  decides spawn/unlock/loot; guest mirrors via network events. ║
+    // ║  Opening one blocks firing for CONFIG.treasureBox.unlockTime  ║
+    // ║  seconds — the deliberate vulnerability window.               ║
+    // ╚══════════════════════════════════════════════════════════════╝
+    class TreasureBoxSystem {
+      constructor(particles, hudAnimator){
+        this._particles=particles; this._hud=hudAnimator;
+        this._boxes=[]; this._timer=10; this._platforms=[]; this._time=0; this._nextId=1;
+      }
+      setPlatforms(p){ this._platforms=p; }
+
+      _spawn(){
+        const woodPlats=this._platforms.filter(p=>p.type==='wood');
+        if(!woodPlats.length) return;
+        const p=woodPlats[Math.floor(Math.random()*woodPlats.length)];
+        const x=p.x+p.w*0.2+Math.random()*p.w*0.6, y=p.y-20;
+        if(this._boxes.some(b=>!b.looted&&Math.abs(b.x-x)<100)) return;
+        const box={ id:this._nextId++, x, y, looted:false, unlockingBy:null, unlockStart:0 };
+        this._boxes.push(box);
+        return box;
+      }
+
+      // Host calls with iAmHost=true and actually decides things. Guest calls with
+      // iAmHost=false — its boxes only ever change via the on* mirror methods below,
+      // fed by network events, same pattern as round-over and coins.
+      update(dt, players, iAmHost, network){
+        this._time+=dt;
+        if(!iAmHost) return;
+
+        this._timer-=dt;
+        const activeCount=this._boxes.filter(b=>!b.looted).length;
+        if(this._timer<=0 && activeCount<CONFIG.treasureBox.maxBoxes){
+          const box=this._spawn();
+          this._timer=CONFIG.treasureBox.spawnInterval;
+          if(box && network?.isOnline) network.sendEvent('boxSpawned',{id:box.id,x:box.x,y:box.y});
+        }
+
+        for(const box of this._boxes){
+          if(box.looted) continue;
+          let nearPlayer=null;
+          for(const p of players){
+            if(p.dead) continue;
+            const dx=(p.x+p.width/2)-box.x, dy=(p.y+p.height/2)-box.y;
+            if(dx*dx+dy*dy < CONFIG.treasureBox.radius*CONFIG.treasureBox.radius){ nearPlayer=p; break; }
+          }
+          if(nearPlayer){
+            if(box.unlockingBy!==nearPlayer.id){
+              box.unlockingBy=nearPlayer.id; box.unlockStart=this._time;
+              nearPlayer.isUnlocking=true;
+              if(network?.isOnline) network.sendEvent('boxUnlockStart',{boxId:box.id,playerId:nearPlayer.id});
+            }
+            if(this._time-box.unlockStart>=CONFIG.treasureBox.unlockTime){
+              box.looted=true; nearPlayer.isUnlocking=false;
+              const pool=CONFIG.treasureBox.pool;
+              const pick=pool[Math.floor(Math.random()*pool.length)];
+              const dropped=nearPlayer.weaponSystem.equipWeapon(pick);
+              this._particles.emitPickupFlash(box.x,box.y);
+              this._hud.addFloatText(box.x,box.y-20,`+${pick.toUpperCase()}`,'#FFD700');
+              bus.emit('treasurebox:looted',{playerId:nearPlayer.id,weapon:pick});
+              if(network?.isOnline) network.sendEvent('boxLooted',{boxId:box.id,playerId:nearPlayer.id,weapon:pick,dropped});
+            }
+          } else if(box.unlockingBy){
+            const p=players.find(pl=>pl.id===box.unlockingBy);
+            if(p) p.isUnlocking=false;
+            box.unlockingBy=null; box.unlockStart=0;
+            if(network?.isOnline) network.sendEvent('boxUnlockCancel',{boxId:box.id});
+          }
+        }
+      }
+
+      // Guest-side mirrors — called from GameLoop's network event listeners.
+      onBoxSpawned({id,x,y}){ if(!this._boxes.some(b=>b.id===id)) this._boxes.push({id,x,y,looted:false,unlockingBy:null,unlockStart:this._time}); }
+      onUnlockStart({boxId,playerId},players){
+        const b=this._boxes.find(b=>b.id===boxId); if(b){ b.unlockingBy=playerId; b.unlockStart=this._time; }
+        const p=players.find(pl=>pl.id===playerId); if(p) p.isUnlocking=true;
+      }
+      onUnlockCancel({boxId},players){
+        const b=this._boxes.find(b=>b.id===boxId);
+        if(b){ const p=players.find(pl=>pl.id===b.unlockingBy); if(p) p.isUnlocking=false; b.unlockingBy=null; b.unlockStart=0; }
+      }
+      onLooted({boxId,playerId,weapon},players){
+        const b=this._boxes.find(b=>b.id===boxId); if(b) b.looted=true;
+        const p=players.find(pl=>pl.id===playerId);
+        if(p){ p.isUnlocking=false; p.weaponSystem.equipWeapon(weapon); this._particles.emitPickupFlash(b?.x||p.x,b?.y||p.y); }
+      }
+
+      draw(ctx, cx, cy){
+        const t=this._time;
+        ctx.save();
+        for(const box of this._boxes){
+          if(box.looted) continue;
+          const sx=box.x-cx, sy=box.y-cy;
+          if(sx<-60||sx>ctx.canvas.width+60) continue;
+
+          const unlocking = !!box.unlockingBy;
+          const progress = unlocking ? Math.min(1,(t-box.unlockStart)/CONFIG.treasureBox.unlockTime) : 0;
+          const glowAlpha=0.4+Math.sin(t*((Math.PI*2)/1.2)+box.id)*0.35;
+
+          ctx.save();
+          ctx.translate(sx,sy);
+
+          ctx.shadowColor='#FFD700'; ctx.shadowBlur=14*glowAlpha*2;
+          ctx.strokeStyle=`rgba(255,215,0,${glowAlpha})`; ctx.lineWidth=2;
+          ctx.strokeRect(-14,-14,28,28);
+          ctx.shadowBlur=0;
+
+          ctx.fillStyle='#5c4a1a'; ctx.fillRect(-14,-14,28,28);
+          ctx.fillStyle='#3d3010'; ctx.fillRect(-14,-2,28,4);
+          ctx.fillStyle='#FFD700'; ctx.fillRect(-3,-14,6,10);
+
+          if(unlocking){
+            ctx.fillStyle='rgba(10,10,18,0.75)'; ctx.fillRect(-16,-24,32,5);
+            ctx.fillStyle='#00e5ff'; ctx.fillRect(-15,-23,30*progress,3);
+          }
+
+          ctx.restore();
+        }
+        ctx.restore();
+      }
+    }
     // ║  Thrown grenades: parabolic arc, rotation, cook pulse,       ║
     // ║  explosion ring + debris + screen shake.                     ║
     // ╚══════════════════════════════════════════════════════════════╝
@@ -954,10 +1076,6 @@
       }
 
       plant(player){
-        // Consume one mine from weapon system
-        const ws = player.weaponSystem;
-        if(!ws.consumeShot()) return;
-
         this._mines.push({
           x: player.x + player.width/2,
           y: player.y + player.height - 4,
@@ -1415,7 +1533,7 @@
         this.maxAmmo=this.ammo;
         this.jetpack=CONFIG.gameplay.maxJetpack; this.maxJetpack=CONFIG.gameplay.maxJetpack;
         this.onGround=false; this.facing=1;
-        this.shootCooldown=0; this.reloading=false; this.reloadTimer=0;
+        this.shootCooldown=0; this.reloading=false; this.reloadTimer=0; this.isUnlocking=false;
         this.dead=false; this.respawnTimer=0; this.bullets.length=0;
         this._inputBuffer.length=0;
         this._fallVelocity=0;
@@ -1450,12 +1568,12 @@
 
         // Grenade cook
         const ws=this.weaponSystem;
-        if(inp.throw && ws.activeWeapon==='grenade' && ws.getMag()>0){
+        if(inp.throw && ws.explosive?.type==='grenade' && ws.explosive.count>0){
           ws.startCook();
         } else if(!inp.throw && ws._isCooking){
           // Release → throw
           if(grenadeSystem){
-            ws.consumeShot();
+            ws.useExplosive();
             grenadeSystem.throw(this, ws.cookProgress());
           }
           ws.stopCook();
@@ -1512,7 +1630,7 @@
 
         // Shooting (only for gun weapons)
         const isGun=['pistol','shotgun','smg'].includes(ws.activeWeapon);
-        if(inp.shoot&&isGun&&this.shootCooldown<=0&&!this.reloading){
+        if(inp.shoot&&isGun&&this.shootCooldown<=0&&!this.reloading&&!this.isUnlocking){
           if(ws.getMag()>0){
             // Fire pellets
             const pellets=wDef.pellets||1;
@@ -1541,8 +1659,9 @@
         this.shootCooldown=Math.max(0,this.shootCooldown-dt);
 
         // Landmine plant
-        if(inp.mine && ws.activeWeapon==='landmine' && this.onGround && landmineSystem){
-          if(ws.getMag()>0) landmineSystem.plant(this);
+        if(inp.mine && ws.explosive?.type==='landmine' && ws.explosive.count>0 && this.onGround && landmineSystem){
+          ws.useExplosive();
+          landmineSystem.plant(this);
         }
 
         // Sync ammo display
@@ -2081,94 +2200,65 @@
 
       // ── Weapon slot HUD (bottom centre) ─────────────────────────
       _drawWeaponHUD(ctx, ws, centreX, baseY){
-        const slotKeys=['pistol','shotgun','smg','grenade','landmine'];
-        const slotLabels=['PISTOL','SHOTGUN','SMG','NADE','MINE'];
-        const slotIcons=['P','SG','SM','G','M'];
         const slotW=46, slotH=54, gap=6;
-        const totalW=slotKeys.length*slotW+(slotKeys.length-1)*gap;
+        const totalSlots=3; // 2 weapons + 1 explosive
+        const totalW=totalSlots*slotW+(totalSlots-1)*gap;
         const startX=centreX-totalW/2;
 
-        slotKeys.forEach((key,i)=>{
-          const def=CONFIG.weapons[key];
-          const isActive=ws.activeWeapon===key;
+        for(let i=0;i<3;i++){
+          const isExplosiveSlot = i===2;
+          const held = isExplosiveSlot ? ws.explosive : ws.weaponSlots[i];
+          const isActive = !isExplosiveSlot && i===ws.activeSlotIndex;
+          const empty = !held;
           const sx=startX+i*(slotW+gap);
           const sy=baseY-slotH;
-          const scale=ws._slotScales[i];
-          const locked=!def.unlocked;
-          const isLockedFlash=ws.isLockedSlot(i+1);
+          const scale = isExplosiveSlot ? 1 : ws._slotScales[i];
+          const isLockedFlash = !isExplosiveSlot && ws.isLockedSlot(i+1);
 
-          // Recoil / shake offset only on active slot
           let offX=0, offY=0;
-          if(isActive){
-            offX=ws.getRecoilX();
-            offY=ws.getSlideY();
-          }
-          if(isLockedFlash){
-            offX=Math.sin(ws._lockedTimer*80)*4;
-          }
+          if(isActive){ offX=ws.getRecoilX(); offY=ws.getSlideY(); }
+          if(isLockedFlash) offX=Math.sin(ws._lockedTimer*80)*4;
 
           ctx.save();
           ctx.translate(sx+slotW/2+offX, sy+slotH/2+offY);
           ctx.scale(scale,scale);
-
           const cx2=-slotW/2, cy2=-slotH/2;
 
-          // Slot background
           if(isActive){
-            ctx.fillStyle='rgba(0,229,255,0.18)';
-            ctx.strokeStyle='rgba(0,229,255,0.85)';
-            ctx.lineWidth=2;
-            ctx.shadowColor='rgba(0,229,255,0.6)';
-            ctx.shadowBlur=10;
-          }else if(locked){
-            ctx.fillStyle='rgba(40,40,40,0.7)';
-            ctx.strokeStyle='rgba(100,100,100,0.4)';
-            ctx.lineWidth=1;
+            ctx.fillStyle='rgba(0,229,255,0.18)'; ctx.strokeStyle='rgba(0,229,255,0.85)';
+            ctx.lineWidth=2; ctx.shadowColor='rgba(0,229,255,0.6)'; ctx.shadowBlur=10;
+          }else if(empty){
+            ctx.fillStyle='rgba(40,40,40,0.7)'; ctx.strokeStyle='rgba(100,100,100,0.4)'; ctx.lineWidth=1;
           }else{
-            ctx.fillStyle='rgba(20,30,50,0.75)';
-            ctx.strokeStyle='rgba(255,255,255,0.2)';
-            ctx.lineWidth=1;
+            ctx.fillStyle='rgba(20,30,50,0.75)'; ctx.strokeStyle='rgba(255,255,255,0.2)'; ctx.lineWidth=1;
           }
           ctx.beginPath(); ctx.roundRect(cx2,cy2,slotW,slotH,5); ctx.fill(); ctx.stroke();
           ctx.shadowBlur=0;
 
-          // Slot number
-          ctx.font='8px "Orbitron",monospace';
-          ctx.textAlign='center';
+          ctx.font='8px "Orbitron",monospace'; ctx.textAlign='center';
           ctx.fillStyle=isActive?'rgba(0,229,255,0.9)':'rgba(255,255,255,0.35)';
-          ctx.fillText(i+1, 0, cy2+11);
+          ctx.fillText(isExplosiveSlot?'E':(i+1), 0, cy2+11);
 
-          // Weapon icon (text symbol)
-          ctx.font=`bold ${locked?'13':'16'}px "Share Tech Mono",monospace`;
-          ctx.fillStyle=locked?'rgba(80,80,80,0.6)':(isActive?'#fff':'rgba(200,200,200,0.8)');
-          ctx.fillText(slotIcons[i], 0, -4);
+          const def = held ? CONFIG.weapons[held.type] : null;
+          const icon = empty ? '–' : (def?.label?.[0]||'?');
+          ctx.font=`bold ${empty?'13':'16'}px "Share Tech Mono",monospace`;
+          ctx.fillStyle=empty?'rgba(80,80,80,0.6)':(isActive?'#fff':'rgba(200,200,200,0.8)');
+          ctx.fillText(icon, 0, -4);
 
-          // Ammo count / grenade count
-          const ammoData=ws._ammo[key];
-          if(ammoData&&!locked){
+          if(held && 'mag' in held){
             ctx.font='9px "Share Tech Mono",monospace';
-            if('mag' in ammoData){
-              ctx.fillStyle=ammoData.mag===0?'#ff4444':'rgba(0,229,255,0.9)';
-              ctx.fillText(ammoData.mag, -6, cy2+slotH-5);
-              ctx.fillStyle='rgba(255,255,255,0.3)';
-              ctx.fillText(`/${ammoData.reserve}`, 10, cy2+slotH-5);
-            }else if('count' in ammoData){
-              ctx.fillStyle=ammoData.count===0?'#ff4444':'#FFD700';
-              ctx.fillText(`×${ammoData.count}`, 0, cy2+slotH-5);
-            }
-          }
-
-          // LOCKED overlay
-          if(locked||isLockedFlash){
-            ctx.fillStyle=`rgba(0,0,0,${isLockedFlash?0.3:0.55})`;
-            ctx.beginPath(); ctx.roundRect(cx2,cy2,slotW,slotH,5); ctx.fill();
-            ctx.font='bold 9px "Orbitron",monospace';
-            ctx.fillStyle=isLockedFlash?'#ff4444':'rgba(150,50,50,0.8)';
-            ctx.fillText('LOCK',0,2);
+            ctx.fillStyle=held.mag===0?'#ff4444':'rgba(0,229,255,0.9)';
+            ctx.fillText(held.mag, -6, cy2+slotH-5);
+            ctx.fillStyle='rgba(255,255,255,0.3)';
+            ctx.fillText(`/${held.reserve}`, 10, cy2+slotH-5);
+          }else if(held && 'count' in held){
+            ctx.font='9px "Share Tech Mono",monospace';
+            ctx.fillStyle=held.count===0?'#ff4444':'#FFD700';
+            ctx.fillText(`×${held.count}`, 0, cy2+slotH-5);
           }
 
           ctx.restore();
-        });
+        }
 
         // Active weapon label above slots
         ctx.save();
@@ -2262,9 +2352,11 @@
 
         // New systems
         this._ammoCrates  = new AmmoCrateSystem(this._particles, this._hud);
+        this._treasureBoxes = new TreasureBoxSystem(this._particles, this._hud);
         this._grenades    = new GrenadeSystem(this._particles, this._camera);
         this._landmines   = new LandmineSystem(this._particles, this._camera);
         this._ammoCrates.setPlatforms(this._platforms);
+        this._treasureBoxes.setPlatforms(this._platforms);
 
         this._running=false; this._lastTime=null;
         this._frameCount=0; this._fpsAccum=0; this._fps=0;
@@ -2341,6 +2433,22 @@
         if(wsUrl){
           this._network.connect(wsUrl,roomId,'Player');
           bus.once('network:playerId',id=>{this._players.forEach(p=>{p.isLocal=(p.id===id);}); this._camera.setMode('self');});
+          bus.on('game:boxSpawned',(data)=>{
+            const iAmHost=this._players.find(p=>p.id==='p1')?.isLocal;
+            if(this._network.isOnline && !iAmHost) this._treasureBoxes.onBoxSpawned(data);
+          });
+          bus.on('game:boxUnlockStart',(data)=>{
+            const iAmHost=this._players.find(p=>p.id==='p1')?.isLocal;
+            if(this._network.isOnline && !iAmHost) this._treasureBoxes.onUnlockStart(data,this._players);
+          });
+          bus.on('game:boxUnlockCancel',(data)=>{
+            const iAmHost=this._players.find(p=>p.id==='p1')?.isLocal;
+            if(this._network.isOnline && !iAmHost) this._treasureBoxes.onUnlockCancel(data,this._players);
+          });
+          bus.on('game:boxLooted',(data)=>{
+            const iAmHost=this._players.find(p=>p.id==='p1')?.isLocal;
+            if(this._network.isOnline && !iAmHost) this._treasureBoxes.onLooted(data,this._players);
+          });
           bus.on('game:coinCollected',(data)=>{
             const iAmHost=this._players.find(p=>p.id==='p1')?.isLocal;
             if(this._network.isOnline && !iAmHost){
@@ -2459,6 +2567,8 @@
 
         // ── New systems ──────────────────────────────────────────
         this._ammoCrates.update(dt, this._players);
+        const boxIAmHost = !this._network.isOnline || this._players.find(p=>p.id==='p1')?.isLocal;
+        this._treasureBoxes.update(dt, this._players, boxIAmHost, this._network);
         this._grenades.update(dt, this._players);
         this._landmines.update(dt, this._players);
         this._hud.update(dt);
@@ -2517,6 +2627,7 @@
         this._drawPlatforms(ctx,cx,cy);
         this._drawCoins(ctx,cx,cy);
         this._ammoCrates.draw(ctx,cx,cy);
+        this._treasureBoxes.draw(ctx,cx,cy);
         this._grenades.draw(ctx,cx,cy,this._time);
         this._landmines.draw(ctx,cx,cy,this._time);
         this._particles.draw(ctx,cx,cy);

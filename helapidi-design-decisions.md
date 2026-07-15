@@ -188,3 +188,95 @@ model, confirmed by your screenshot showing identical "2/20" on both screens. Re
 - HUD shows only the local player's own count — verified independently correct on both
   screens (not coincidentally equal).
 - Resets per-player each round, alongside the existing coin respawn.
+
+## Weapon System Rework — Data Shape (write-down before implementation)
+Branch: `weaponSystem`. Replaces the current model where every player permanently owns
+all 5 weapon types with their own ammo pools (`activeWeapon` = which one is "on
+screen"). New shape, per player:
+
+```js
+weaponSlots: [
+  { type:'pistol', mag:8, reserve:24 },   // slot 0 — starting weapon, every player
+  { type:'melee' }                         // slot 1 — character melee, no ammo, always owned
+],
+activeSlotIndex: 0,   // which of weaponSlots[0/1] is currently equipped
+explosive: { type:'grenade', count:3 }     // OR {type:'landmine', count:2} — mutually exclusive, one slot
+```
+
+Key differences from today: a slot can be **empty or occupied by a specific acquired
+weapon**, not "always all 5, pick which is active." Picking up a new weapon from a
+treasure box fills an empty slot, or — if both are full — forces a drop-and-replace on
+whichever slot the player chooses. The explosive slot holds ONE type at a time (3
+grenades OR 2 landmines), never both.
+
+## Staged Build Plan (per council recommendation — one piece at a time, 1v1 only)
+1. **Inventory model + swap mechanics** (this session) — can a player hold 2 weapons +
+   1 explosive and switch/drop/equip correctly, tested with a debug grant method, no
+   treasure boxes yet.
+2. Treasure-box entities: spawn, closed/opening/looted states, random placement —
+   host-authoritative from the first line, not retrofitted after a sync bug (this
+   project has hit that exact mistake twice already: round-over, then coins).
+3. Unlock-vulnerability window (can't fire while opening a box) — last, as a refinement
+   once 1 and 2 are solid.
+
+Not touching Solo/Duos/Squads until this works in 1v1 first, same discipline as
+networking and the HUD rework.
+
+## Weapon System Rework — Piece 1 Done: Inventory Model (VERIFIED)
+- `WeaponSystem` rebuilt around `weaponSlots` (2, starts pistol + melee) and a single
+  `explosive` slot (starts grenade×3). `activeWeapon` kept as a derived/mirrored
+  property so the ~25 existing call sites (HUD, shoot/throw logic, damage calc) kept
+  working unmodified — did not touch those, on purpose, to limit blast radius.
+- Added `melee` to `CONFIG.weapons` (character-specific melee is still generic/placeholder
+  until character integration happens — real per-character melee is a later dependency).
+- `equipWeapon(type)` — fills an empty slot if one exists, otherwise replaces whichever
+  slot is currently active; returns what got dropped. Both slots start populated
+  (pistol + melee), so in practice v1 always replaces-the-active-slot — refine this to
+  genuine slot choice once drop-to-ground exists.
+- `useExplosive()` — grenade/landmine now come from one shared slot, not the old
+  always-available separate weapon types. Fixed a real double-decrement bug this
+  surfaced: `LandmineSystem.plant()` used to consume ammo itself; now the caller
+  consumes via `useExplosive()` before calling `plant()`, matching the grenade pattern.
+- HUD rebuilt: 3 slots (2 weapons + explosive with an "E" marker) instead of 5.
+- TEMP/DEBUG ONLY: pressing `T` grants a random weapon, to test `equipWeapon()` without
+  a treasure-box system existing yet. Remove this key binding once real pickups exist.
+
+### Explicitly not done yet (pieces 2 and 3, per the staged plan)
+- Treasure-box entities (spawn, closed/opening/looted states, random placement) — not
+  built. Must be host-authoritative from line one this time, not retrofitted.
+- Unlock-vulnerability window (can't fire while opening a box) — not built, depends on
+  treasure boxes existing first.
+- Dropped weapons don't spawn on the ground yet — `equipWeapon` returns what was
+  dropped, but nothing currently does anything with that value.
+- Real melee combat (an actual attack, not just an equippable slot) — not built.
+- None of this has been tested over the network yet — this session was local-only,
+  matching "test the inventory model in isolation first."
+
+## Weapon System Rework — Status Update (branch: weaponSystem)
+**Piece 1 (inventory model) was already built** earlier in this session — found, not
+remembered cleanly, then re-verified for real (pressed the debug key twice, confirmed
+correct slot-fill and active-slot-replace behavior) before trusting it.
+
+**Piece 2 (treasure boxes) — BUILT AND VERIFIED THIS SESSION:**
+- `TreasureBoxSystem`, modeled on the existing `AmmoCrateSystem` pattern (random spawn
+  on wood platforms, timer-gated, proximity-triggered).
+- Host-authoritative from the start (per the council's own recommendation) — only the
+  host decides spawn/unlock/loot; guest mirrors via 4 new event types (`boxSpawned`,
+  `boxUnlockStart`, `boxUnlockCancel`, `boxLooted`).
+- Unlock takes `CONFIG.treasureBox.unlockTime` (2.5s default) standing near the box;
+  walking away cancels progress. Blocks firing for the duration via `player.isUnlocking`
+  — the deliberate vulnerability window from the original spec.
+- On completion, grants a random weapon via the existing `equipWeapon()` — no new
+  pickup-application logic needed, reused what Piece 1 already built.
+- Debug 'T' key removed now that real pickups exist, per its own comment.
+- Config: `treasureBox: { spawnInterval:22, maxBoxes:2, radius:36, unlockTime:2.5,
+  pool:['pistol','shotgun','smg'] }`
+
+**Known cleanup, not urgent:** `CONFIG.weapons` still has leftover `slot:1`-`slot:5`
+fields from the old 5-weapon model. Nothing reads them anymore (confirmed) — cosmetic
+debt, not a bug.
+
+**Not built yet:** Piece 3 (explicit visual/audio telegraphing of the vulnerability
+window beyond the progress bar), drop-to-ground for the weapon you swap away, and
+character-specific melee weapons (still generic — real integration waits on the actual
+Kehi/Kottu Rush/Tuk-Tuk Aiya sprites, sequenced later per the existing roadmap).
