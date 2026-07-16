@@ -280,3 +280,27 @@ debt, not a bug.
 window beyond the progress bar), drop-to-ground for the weapon you swap away, and
 character-specific melee weapons (still generic — real integration waits on the actual
 Kehi/Kottu Rush/Tuk-Tuk Aiya sprites, sequenced later per the existing roadmap).
+
+## Mobile Optimization Pass — VERIFIED (branch: weaponSystem)
+Tested on real device emulation (Playwright + Pixel 5 profile, both orientations),
+not just read from code — found two real bugs and one real gap:
+
+- **Touch had no movement input at all.** `isPressed()` checked keyboard → gamepad →
+  touch, but the touch overlay only ever set jump/shoot/jetpack/reload. On an actual
+  phone with no keyboard, movement was impossible. Added `◀`/`▶` touch buttons;
+  confirmed on-device that holding one actually moves the local player (x: 400→592
+  over 600ms).
+- **Touch overlay was still building one control set per player** (leftover from the
+  same-device split-screen era) — would have shown a second, non-functional control set
+  belonging to the other player on a real phone. Rewrote to build exactly one overlay,
+  for whichever player the network actually assigns as local (`setActiveTouchPlayer`,
+  called from the existing `network:playerId` handler). Falls back to `p1` for
+  offline/local testing.
+- **Landscape-only game, no portrait handling** — canvas scaling itself was already
+  correct (aspect-ratio-preserving scale-to-fit), but a portrait phone shrank the game
+  into a thin horizontal strip with large empty margins. Added a rotate-to-landscape
+  prompt, gated to touch devices only (confirmed a narrow desktop window does NOT
+  trigger it) so it never falsely fires for a resized desktop browser.
+
+Not addressed this pass: on-screen weapon-slot switching for touch (currently still
+keyboard-only via 1/2 keys) — worth a follow-up once this lands.

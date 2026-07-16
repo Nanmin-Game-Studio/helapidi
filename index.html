@@ -216,6 +216,15 @@
     </div>
   </div>
   <div id="gameContainer">
+    <div id="rotateOverlay" style="display:none;position:fixed;inset:0;z-index:6000;background:var(--bg);
+         align-items:center;justify-content:center;flex-direction:column;text-align:center;padding:20px;">
+      <div style="font-size:48px;margin-bottom:16px;animation:rotateHint 1.6s ease-in-out infinite;">📱</div>
+      <div style="font-family:'Orbitron',sans-serif;font-size:18px;letter-spacing:3px;color:#fff;
+           text-shadow:0 0 16px var(--accent);">ROTATE YOUR DEVICE</div>
+      <div style="font-family:'Share Tech Mono',monospace;font-size:12px;color:rgba(255,255,255,0.5);margin-top:8px;">
+        Hēlapidi plays in landscape</div>
+    </div>
+    <style>@keyframes rotateHint{0%,100%{transform:rotate(0deg);}50%{transform:rotate(90deg);}}</style>
     <div id="pauseOverlay" style="display:none;position:absolute;inset:0;z-index:5000;background:rgba(5,8,18,0.85);
          align-items:center;justify-content:center;flex-direction:column;">
       <div style="font-family:'Orbitron',sans-serif;font-size:24px;letter-spacing:6px;color:#fff;
@@ -1359,23 +1368,37 @@
       }
       _initTouch(canvas){
         if(!('ontouchstart' in window)) return;
-        CONFIG.players.forEach((pc,idx)=>this._buildTouchOverlay(pc.id,idx,canvas));
+        this._touchCanvas=canvas;
+        this._buildTouchOverlay('p1'); // default until network tells us who we actually are
         canvas.addEventListener('touchstart',e=>{e.preventDefault();},{ passive:false });
         canvas.addEventListener('touchend',  e=>{e.preventDefault();},{ passive:false });
       }
-      _buildTouchOverlay(pid,side,canvas){
+      // Called once the network assigns our real player id — rebuilds the single
+      // touch overlay for whoever that turns out to be, instead of guessing at init.
+      setActiveTouchPlayer(pid){
+        if(!('ontouchstart' in window)) return;
+        if(this._touchOverlayEl) this._touchOverlayEl.remove();
+        CONFIG.players.forEach(pc=>{ this._touchState[pc.id]={}; }); // clear stale state
+        this._buildTouchOverlay(pid);
+      }
+      _buildTouchOverlay(pid){
         const div=document.createElement('div');
-        div.style.cssText=`position:fixed;bottom:0;${side===0?'left:0':'right:0'};width:50%;height:160px;pointer-events:auto;z-index:200;`;
+        div.style.cssText=`position:fixed;inset:0;pointer-events:none;z-index:200;`;
+        this._touchOverlayEl=div;
         const btns=[
-          {r:'jump',  l:'↑', pos:side===0?'right:80px':'left:80px',   bot:'80px',bg:'rgba(76,175,80,.65)'},
-          {r:'shoot', l:'🔫',pos:side===0?'right:20px':'left:20px',   bot:'40px',bg:'rgba(255,99,71,.65)'},
-          {r:'jetpack',l:'⚡',pos:side===0?'right:140px':'left:140px',bot:'40px',bg:'rgba(255,165,0,.65)'},
-          {r:'reload', l:'R', pos:side===0?'right:80px':'left:80px',  bot:'10px',bg:'rgba(100,149,237,.65)'},
+          // Movement — left thumb, left side of screen.
+          {r:'left',   l:'◀', side:'left',  pos:'left:20px',  bot:'50px', bg:'rgba(255,255,255,.25)'},
+          {r:'right',  l:'▶', side:'left',  pos:'left:90px',  bot:'50px', bg:'rgba(255,255,255,.25)'},
+          // Actions — right thumb, right side of screen.
+          {r:'jump',   l:'↑', side:'right', pos:'right:80px', bot:'80px', bg:'rgba(76,175,80,.65)'},
+          {r:'shoot',  l:'🔫',side:'right', pos:'right:20px', bot:'40px', bg:'rgba(255,99,71,.65)'},
+          {r:'jetpack',l:'⚡',side:'right', pos:'right:140px',bot:'40px', bg:'rgba(255,165,0,.65)'},
+          {r:'reload', l:'R', side:'right', pos:'right:80px', bot:'10px', bg:'rgba(100,149,237,.65)'},
         ];
         btns.forEach(b=>{
           const btn=document.createElement('button');
           btn.textContent=b.l;
-          btn.style.cssText=`position:absolute;${b.pos};bottom:${b.bot};width:52px;height:52px;border-radius:50%;background:${b.bg};border:2px solid rgba(255,255,255,.3);color:white;font-size:18px;touch-action:none;user-select:none;`;
+          btn.style.cssText=`position:absolute;${b.pos};bottom:${b.bot};width:52px;height:52px;border-radius:50%;background:${b.bg};border:2px solid rgba(255,255,255,.3);color:white;font-size:18px;touch-action:none;user-select:none;pointer-events:auto;`;
           btn.addEventListener('touchstart',e=>{e.stopPropagation();this._touchState[pid][b.r]=true;});
           btn.addEventListener('touchend',  e=>{e.stopPropagation();this._touchState[pid][b.r]=false;});
           div.appendChild(btn);
@@ -2111,8 +2134,20 @@
       }
 
       _initScale(){
+        const isTouchDevice = 'ontouchstart' in window;
         const scale=()=>{
           const vw=window.innerWidth,vh=window.innerHeight,ar=CONFIG.viewport.targetAspect;
+          const portrait = vw < vh;
+          const rotateEl=document.getElementById('rotateOverlay');
+          const container=document.getElementById('gameContainer');
+          if(isTouchDevice && portrait){
+            if(rotateEl) rotateEl.style.display='flex';
+            if(container) container.style.visibility='hidden';
+            return; // don't bother computing a scale for a view we're hiding
+          }
+          if(rotateEl) rotateEl.style.display='none';
+          if(container) container.style.visibility='visible';
+
           let w=vw,h=vw/ar; if(h>vh){h=vh;w=vh*ar;}
           const sc=Math.min(w/CONFIG.viewport.baseWidth,h/CONFIG.viewport.baseHeight);
           const el=document.getElementById('gameContainer'); if(!el)return;
@@ -2432,7 +2467,7 @@
         this._audio.init();
         if(wsUrl){
           this._network.connect(wsUrl,roomId,'Player');
-          bus.once('network:playerId',id=>{this._players.forEach(p=>{p.isLocal=(p.id===id);}); this._camera.setMode('self');});
+          bus.once('network:playerId',id=>{this._players.forEach(p=>{p.isLocal=(p.id===id);}); this._camera.setMode('self'); this._input.setActiveTouchPlayer(id);});
           bus.on('game:boxSpawned',(data)=>{
             const iAmHost=this._players.find(p=>p.id==='p1')?.isLocal;
             if(this._network.isOnline && !iAmHost) this._treasureBoxes.onBoxSpawned(data);
@@ -2797,7 +2832,7 @@
     ];
 
     function startGame(){
-      const WS_URL = 'ws://localhost:8765';
+      const WS_URL  = '';
       const ROOM_ID = window.location.hash.slice(1) || (WS_URL ? prompt('Room code — type the exact same code in both windows:', 'test1') : null) || null;
       const game    = new GameLoop();
       game.init(WS_URL, ROOM_ID);
